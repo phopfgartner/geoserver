@@ -84,6 +84,12 @@
       </modules>
     </profile>
     <profile>
+      <id>kmlppio</id>
+      <modules>
+        <module>kmlppio</module>
+      </modules>
+    </profile>
+    <profile>
       <id>dbconfig</id>
       <modules>
         <module>dbconfig</module>
