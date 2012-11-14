@@ -1,12 +1,14 @@
-/* Copyright (c) 2001 - 2007 TOPP - www.openplans.org. All rights reserved.
+/* Copyright (c) 2012 R3 GIS - www.r3-gis.com. All rights reserved.
  * This code is licensed under the GPL 2.0 license, available at the root
  * application directory.
  */
 package org.geoserver.wps.ppio;
 
 import java.io.InputStream;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.logging.Logger;
 
 import org.geotools.data.collection.ListFeatureCollection;
@@ -22,10 +24,11 @@ import org.geotools.referencing.crs.DefaultGeographicCRS;
 import org.geotools.util.logging.Logging;
 import org.geotools.xml.Configuration;
 import org.geotools.xml.Encoder;
-import org.geotools.xml.Parser;
 import org.geotools.xml.StreamingParser;
+import org.opengis.feature.Property;
 import org.opengis.feature.simple.SimpleFeature;
 import org.opengis.feature.simple.SimpleFeatureType;
+import org.opengis.feature.type.Name;
 import org.opengis.referencing.FactoryException;
 import org.opengis.referencing.NoSuchAuthorityCodeException;
 import org.opengis.referencing.crs.CRSAuthorityFactory;
@@ -41,20 +44,10 @@ public class KMLPPIO extends XMLPPIO {
 
     SimpleFeatureType type;
 
-    /*
-     * public KMLPPIO(Class type, QName element) { super(type, type, "application/vnd.google-earth.kml+xml", element); xml = new KMLConfiguration(); }
-     */
-
-    /*
-     * protected KMLPPIO() { super(FeatureCollection.class, FeatureCollection.class, "application/vnd.google-earth.kml+xml"); }
-     */
-
     public KMLPPIO() {
         super(FeatureCollection.class, FeatureCollection.class,
                 "application/vnd.google-earth.kml+xml", KML.Document);
 
-        // new org.geotools.wfs.v1_1.WFSConfiguration(), "text/xml; subtype=wfs-collection/1.1",
-        // org.geoserver.wfs.xml.v1_1_0.WFS.FEATURECOLLECTION);
         xml = new KMLConfiguration();
         SimpleFeatureTypeBuilder b = new SimpleFeatureTypeBuilder();
 
@@ -71,42 +64,90 @@ public class KMLPPIO extends XMLPPIO {
     }
 
     /**
-     * Only the geometry is read from the data.
-     * This is mainly due to the fact, that the feature as returned by decode()
-     * can not be handled by the GML writer, since objects of class "Coordinate", e.g. Lookat
-     * are returned
+     * Create a HashMap describing the type signature of the feature
+     * This is used to verify that only features of the same type are
+     * processed.
+     * Only features of types, which are known to be parsable are included
+     * 
+     * @param f
+     * @return
+     */
+    private HashMap<Name, Class> getSignature(SimpleFeature f) {
+        HashMap<Name, Class> ftype = new LinkedHashMap<Name, Class>();
+        Collection<Property> properties = f.getProperties();
+        for (Property p :properties) {
+            Class c = (Class)p.getType().getBinding();
+            if (c.isAssignableFrom(String.class) ||  
+                    c.isAssignableFrom(Boolean.class) ||
+                    c.isAssignableFrom(Integer.class) ||
+                    c.isAssignableFrom(Float.class) ||
+                    c.isAssignableFrom(Double.class) ||
+                    c.isAssignableFrom(Geometry.class)
+                    ) {
+            ftype.put(p.getName(), c);
+            }
+        }
+        return ftype;
+    }
+    
+    /**
+     * Convert the HashMap into a TeatureType
+     * 
+     * @param ftype
+     * @return
+     */
+    private SimpleFeatureType getType(HashMap<Name, Class> ftype) {
+        SimpleFeatureTypeBuilder b = new SimpleFeatureTypeBuilder();
+        //set the name
+        b.setName( "puregeometries" );
+
+        //add a geometry property
+        b.setCRS( DefaultGeographicCRS.WGS84 );
+        for (Map.Entry<Name, Class> entry : ftype.entrySet()) {
+            b.add( entry.getKey().toString(), entry.getValue() );
+        }                
+        return b.buildFeatureType();
+    }
+    
+    
+    /**
+     * Read KML file. This is not done with decode, since some features con not be converted by
+     * other DataSources.
      */
     @Override
     public Object decode(InputStream input) throws Exception {
-        SimpleFeatureBuilder builder = new SimpleFeatureBuilder(type);
-        
-        StreamingParser parser = new StreamingParser(new KMLConfiguration(), input,
-                KML.Placemark);
+
+        StreamingParser parser = new StreamingParser(new KMLConfiguration(), input, KML.Placemark);
         SimpleFeature f = null;
-        SimpleFeatureCollection features = new ListFeatureCollection(type);
+        SimpleFeatureCollection features = null; // new ListFeatureCollection(type)
+        HashMap<Name, Class> oldftype = null;
+        SimpleFeatureType type = null;
+        SimpleFeatureBuilder featureBuilder = null;
 
         while ((f = (SimpleFeature) parser.parse()) != null) {
-            Object dg = ((SimpleFeature) f).getDefaultGeometry();
-            if (dg != null) {
-                builder.add(dg);
-                SimpleFeature fnew = builder.buildFeature(f.getID());
-                features.add(fnew);
+            HashMap<Name, Class> ftype = getSignature(f);
+            if (oldftype == null) {
+                oldftype = ftype;
+                type = getType(ftype);
+                featureBuilder = new SimpleFeatureBuilder(type);
+                features = new ListFeatureCollection(type);
+            } else if (!oldftype.equals(ftype)){
+                // maybe I'm overly defensive here. Can it happen that features with a different type land here?
+                break;
             }
+            for (Map.Entry<Name, Class> entry : ftype.entrySet()) {
+                featureBuilder.add(f.getAttribute(entry.getKey()));
+            }                
+            SimpleFeature fnew = featureBuilder.buildFeature(f.getID());
+            features.add(fnew);
         }
         return features;
-        
-        /*
-         * Parser p = new Parser(xml); Object retval = p.parse(input); LOGGER.info("KMLPPIO::decode: returned object is of type " +
-         * retval.getClass().getName()); List<Object> values = ((SimpleFeatureImpl) retval).getAttributes();
-        return retval;
-         */
     }
 
     @Override
     public void encode(Object obj, ContentHandler handler) throws Exception {
-        LOGGER.info("KMLPPIO::encode: obj is of class " + obj.getClass().getName());
-        LOGGER.info("KMLPPIO::encode: handler is of class " + handler.getClass().getName());
-        Encoder e = new Encoder(xml);
+        LOGGER.info("KMLPPIO::encode: obj is of class " + obj.getClass().getName()+
+                ", handler is of class " + handler.getClass().getName());
         CRSAuthorityFactory factory = CRS.getAuthorityFactory(true);
         CoordinateReferenceSystem targetCRS;
         try {
@@ -114,8 +155,6 @@ public class KMLPPIO extends XMLPPIO {
             obj = new ReprojectingFeatureCollection((FeatureCollection) obj, targetCRS);
             Encoder encoder = new Encoder(new KMLConfiguration());
             encoder.setIndenting(true);
-
-            LOGGER.info("KMLPPIO::encode: value is of class " + obj.getClass().getName());
             encoder.encode((FeatureCollection) obj, KML.kml, handler);
         } catch (NoSuchAuthorityCodeException e1) {
             LOGGER.warning(e1.toString());
@@ -129,45 +168,4 @@ public class KMLPPIO extends XMLPPIO {
     public String getFileExtension() {
         return "kml";
     }
-
-    // /**
-    // * Place holder for process params which declare Geometry.class as the type.
-    // */
-    // public static class Geometry extends KMLPPIO {
-    // public Geometry() {
-    // super(com.vividsolutions.jts.geom.Geometry.class, KML.Geometry);
-    // }
-    //
-    // @Override
-    // public void encode(Object object, ContentHandler output) throws Exception {
-    // if (object instanceof GeometryCollection) {
-    // /*
-    // * if ( object instanceof MultiPoint ) { new KMLPPIO(MultiPoint.class,KML.MultiGeometry).encode(object, output); } else if ( object
-    // * instanceof MultiLineString ) { new KMLPPIO(MultiLineString.class,GML.MultiLineString).encode(object, output); } else if ( object
-    // * instanceof MultiPolygon ) { new KMLPPIO(MultiPolygon.class,GML.MultiPolygon).encode(object, output); } else { new
-    // * KMLPPIO(GeometryCollection.class, GML._Geometry).encode(object, output); }
-    // */
-    // } else {
-    // if (object instanceof Point) {
-    // new KMLPPIO(Point.class, KML.Point).encode(object, output);
-    // } else if (object instanceof LineString) {
-    // new KMLPPIO(LineString.class, KML.LineString).encode(object, output);
-    // } else if (object instanceof Polygon) {
-    // new KMLPPIO(Polygon.class, KML.Polygon).encode(object, output);
-    // }
-    // }
-    // }
-    //
-    // }
-    //
-    // /**
-    // * PPIO with alternate mime type suitable for usage in Execute KVP
-    // */
-    // public static class GeometryAlternate extends Geometry {
-    //
-    // public GeometryAlternate() {
-    // super();
-    // mimeType = "application/vnd.google-earth.kml+xml";
-    // }
-    // }
 }
